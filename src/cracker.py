@@ -28,11 +28,11 @@ async def get_main():
         return password
 
 
-class DaemonAsnycPoster:
+class AsnycPoster:
     def __init__(self,num_consumers,queue_size):
         self.queue = asyncio.Queue(queue_size)
         self.num_consumers = num_consumers
-        self.semaphore = asyncio.Semaphore(1000)
+        self.semaphore = asyncio.Semaphore(1024) #1024 max limit of TCP connection 
 
     async def start(self):
         self.consumers = [
@@ -145,7 +145,7 @@ async def boss(min_length,max_length,num_workers):
     processes = []
     pipes=[]
     active_pipes=[]
-    consumer = DaemonAsnycPoster(2,4_000_000)
+    consumer = AsnycPoster(100,4_000_000)
     await consumer.start()
     chunk_size = (max_length - min_length) // num_workers or 1
     try:
