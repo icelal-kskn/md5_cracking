@@ -27,59 +27,75 @@ async def get_main():
         password = await get_password(session, url)
         return password
 
-async def post_password(session:aiohttp.ClientSession,url,password,retrie=3):
-    for _ in range(retrie):
-        try:
-            response = await session.post(
-                f"{url}/check_password",
-                json={"password": password}
-            )
-            response.raise_for_status()
-            logging.info(f"Request returned for {password} with status code {response.status}")
-            message = (await response.json()).get("message")
-            if message == "Success":
-                logging.info(f"Password {password} is correct")
-                raise PasswordFound(password)
-            return "Failed" 
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logging.error(f"Error for {password}: {e}")
-            continue
-    return "Retrie"
-
 
 class DaemonAsnycPoster:
     def __init__(self,num_consumers,queue_size):
         self.queue = asyncio.Queue(queue_size)
         self.num_consumers = num_consumers
+        self.semaphore = asyncio.Semaphore(1000)
 
     async def start(self):
         self.consumers = [
             asyncio.create_task(self._consumer())
             for _ in range(self.num_consumers)
         ]
+        logging.info(f"Started {self.num_consumers} consumers")
     
+    async def _post_password_with_limit(self,session,url,password):
+        async with self.semaphore:
+            return await self._post_password(session,url,password)
+        
     async def _consumer(self):
         url = "http://127.0.0.1:5000"
+        logging.info(f"Consumer started")
         async with aiohttp.ClientSession() as session:
             while True:
                 logging.info(f"Consumer waiting for batch")
                 batch = await self.queue.get()
-                tasks = [post_password(session, url, pw) for pw in batch]
-                await asyncio.gather(*tasks)
+                if batch is None:  # Çıkış sinyali
+                    logging.info("Consumer shutting down")
+                    self.queue.task_done()
+                    break
+                tasks = [self._post_password_with_limit(session, url, pw) for pw in batch]
+                logging.info(f"Batch processing with {len(tasks)} tasks")
+                results = await asyncio.gather(*tasks,return_exceptions=True)
+                logging.info(f"Batch processed with results: {results}")
                 self.queue.task_done()
+    
+    async def _post_password(self,session:aiohttp.ClientSession,url,password,retrie=3):
+        for _ in range(retrie):
+            try:
+                response = await session.post(
+                    f"{url}/check_password",
+                    json={"password": password}
+                )
+                response.raise_for_status()
+                logging.info(f"Request returned for {password} with status code {response.status}")
+                message = (await response.json()).get("message")
+                if message == "Success":
+                    logging.info(f"Password {password} is correct")
+                    raise PasswordFound(password)
+                return "Failed" 
+            except aiohttp.ClientError as e:
+                logging.error(f"Error for {password}: {e}")
+                continue
+            except asyncio.TimeoutError as e:
+                logging.error(f"Timeout for {password}: {e}")
+                continue
+            except PasswordFound as pf:
+                logging.info(f"Password found: {pf.password}")
+        return "Retrie"
     
     async def put(self,batch):
         while self.queue.full():
             logging.info(f"Queue is full. Waiting for 0.1 seconds")
             await asyncio.sleep(0.1)  
         await self.queue.put(batch)
-        await self.start()
-
         logging.info(f"Batch added to queue of size {len(batch)}")
 
     async def stop(self):
         for _ in range(self.num_consumers):
-            self.queue.put(None)
+           await self.queue.put(None)
         if self.consumers:
             await asyncio.gather(*self.consumers)
 
@@ -152,6 +168,7 @@ async def boss(min_length,max_length,num_workers):
                     try:
                         if pipe.poll():
                             passwords = pipe.recv()
+                            await asyncio.sleep(0.01)
                             await consumer.put(passwords)
                             #Çok hızlı üretiyorum Ama Bu hızla tüketemiyorum
                     except OSError as e:
@@ -172,6 +189,8 @@ async def boss(min_length,max_length,num_workers):
             process.join()
 
 def main():
+    password = asyncio.run(get_main())
+    logging.info(f"Password: {password}")
     num_workers = os.cpu_count()
     logging.info(f"Number of workers: {num_workers}")
     min_length = 8
