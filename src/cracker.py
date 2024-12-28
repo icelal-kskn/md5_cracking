@@ -46,16 +46,43 @@ async def post_password(session:aiohttp.ClientSession,url,password,retrie=3):
             continue
     return "Retrie"
 
-async def post_main(queue: multiprocessing.Queue):
-    url = "http://127.0.0.1:5000"
-    async with aiohttp.ClientSession() as session:
-        while True:
-            batch = queue.get()
-            if batch is None:
-                break
-            logging.info(f"Consumer received batch of size {len(batch)}")
-            tasks = [asyncio.create_task(post_password(session, url, pw)) for pw in batch]
-            await asyncio.gather(*tasks)
+
+class DaemonAsnycPoster:
+    def __init__(self,num_consumers,queue_size):
+        self.queue = asyncio.Queue(queue_size)
+        self.num_consumers = num_consumers
+
+    async def start(self):
+        self.consumers = [
+            asyncio.create_task(self._consumer())
+            for _ in range(self.num_consumers)
+        ]
+    
+    async def _consumer(self):
+        url = "http://127.0.0.1:5000"
+        async with aiohttp.ClientSession() as session:
+            while True:
+                logging.info(f"Consumer waiting for batch")
+                batch = await self.queue.get()
+                tasks = [post_password(session, url, pw) for pw in batch]
+                await asyncio.gather(*tasks)
+                self.queue.task_done()
+    
+    async def put(self,batch):
+        while self.queue.full():
+            logging.info(f"Queue is full. Waiting for 0.1 seconds")
+            await asyncio.sleep(0.1)  
+        await self.queue.put(batch)
+        await self.start()
+
+        logging.info(f"Batch added to queue of size {len(batch)}")
+
+    async def stop(self):
+        for _ in range(self.num_consumers):
+            self.queue.put(None)
+        if self.consumers:
+            await asyncio.gather(*self.consumers)
+
 
 def generate_combinations(charset: str,batch_size, length: int = 4):
     results = []
@@ -87,18 +114,24 @@ def worker(start_length,end_length,pipe):
         combination_count = len(charset) ** length
         batch_size = min(1_000_000, combination_count)
         logging.info(f"Length {length} Combinations {combination_count} Batch size {batch_size}")
-        for batch in generate_combinations(charset,batch_size,length):
-            logging.info(f"Sending batch of size {len(batch)}")
-            pipe.send(batch)
-
+        try:
+            for batch in generate_combinations(charset,batch_size,length):
+                logging.info(f"Sending batch of size {len(batch)}")
+                pipe.send(batch)
+        except StopIteration:
+            continue
+    
 
 
 
 async def boss(min_length,max_length,num_workers):
+    multiprocessing.set_start_method("spawn")
     processes = []
     pipes=[]
+    active_pipes=[]
+    consumer = DaemonAsnycPoster(2,4_000_000)
+    await consumer.start()
     chunk_size = (max_length - min_length) // num_workers or 1
-    multiprocessing.set_start_method("spawn")
     try:
         for i in range(min_length, max_length, chunk_size):
             parent_conn, child_conn = multiprocessing.Pipe(False)
@@ -110,24 +143,29 @@ async def boss(min_length,max_length,num_workers):
             )
             processes.append(p)
             pipes.append(parent_conn)
+            active_pipes.append(parent_conn)
             p.start()
         
-        for process in processes:
-            process.join()
-        
-
-        while True:
+        try:
+            while active_pipes:
+                for pipe in active_pipes[:]:
+                    try:
+                        if pipe.poll():
+                            passwords = pipe.recv()
+                            await consumer.put(passwords)
+                            #Çok hızlı üretiyorum Ama Bu hızla tüketemiyorum
+                    except OSError as e:
+                        active_pipes.remove(pipe)
+                        logging.info(f"Pipe removed: {e}")
+                        continue
+        finally:
             for pipe in pipes:
-                if pipe.poll():
-                    passwords = pipe.recv()
-                    logging.info(f"Received batch of size {len(passwords)}")
-                    #Çok hızlı üretiyorum Ama Bu hızla tüketemiyorum
-
+                pipe.close()
+            await consumer.stop()
     
     except Exception as e:
         if isinstance(e, PasswordFound):
             logging.critical(f"Password found: {e.password}")
-        print(e)
         for process in processes:
             process.terminate()
         for process in processes:
