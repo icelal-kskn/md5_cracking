@@ -55,7 +55,7 @@ def generate_combinations(charset: str, length: int = 4):
             break
 
 def worker(start_length,end_length,get_password_,pipe):
-    charset = string.digits + string.ascii_letters
+    charset = string.digits
     logging.info(f"Worker started for lengths {start_length} to {end_length}")
     
     for length in range(start_length, end_length):
@@ -64,8 +64,10 @@ def worker(start_length,end_length,get_password_,pipe):
         try:
             for password in generate_combinations(charset,length):
                 hashed = hashlib.md5(password.encode()).hexdigest()
+                logging.info(f"Password: {password} Hash: {hashed}") #TODO: Remove this line
                 if hashed == get_password_:
                     pipe.send(password)
+                    logging.info(f"Password found: {password} Hash: {hashed}")
                     raise PasswordFound(password)
         except StopIteration:
             continue
@@ -99,6 +101,7 @@ async def boss(get_password,min_length,max_length,num_workers):
                     try:
                         if pipe.poll():
                             found_password = pipe.recv()
+                            logging.info(f"Password found: {found_password}")
                             raise PasswordFound(found_password)
                         
                     except OSError as e:
@@ -112,7 +115,7 @@ async def boss(get_password,min_length,max_length,num_workers):
     except Exception as e:
         if isinstance(e, PasswordFound):
             logging.critical(f"Password found: {e.password}")
-            post_main(e.password)
+            await post_main(e.password)
         for process in processes:
             process.terminate()
         for process in processes:
@@ -123,8 +126,8 @@ def main():
     logging.info(f"Password: {get_password}")
     num_workers = os.cpu_count()
     logging.info(f"Number of workers: {num_workers}")
-    min_length = 8
-    max_length = 16
+    min_length = 1
+    max_length = 9
 
     try:
         asyncio.run(boss(get_password,min_length, max_length, num_workers))
