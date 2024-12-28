@@ -36,16 +36,12 @@ async def post_main(password):
         logging.info(result)
 
 
-def generate_combinations(charset: str,batch_size, length: int = 4):
-    results = []
+def generate_combinations(charset: str, length: int = 4):
     current = [0] * length
     max_index = len(charset) - 1
     while True:
         result = ''.join(charset[i] for i in current)
-        results.append(result)
-        if len(results) == batch_size:
-            yield results
-            results = []
+        yield result
 
         pos= length -1
         while pos >= 0:
@@ -59,20 +55,18 @@ def generate_combinations(charset: str,batch_size, length: int = 4):
             break
 
 def worker(start_length,end_length,get_password_,pipe):
-    charset = string.digits+string.ascii_letters
+    charset = string.digits + string.ascii_letters
     logging.info(f"Worker started for lengths {start_length} to {end_length}")
     
     for length in range(start_length, end_length):
         combination_count = len(charset) ** length
-        batch_size = min(1_000_000, combination_count)
-        logging.info(f"Length {length} Combinations {combination_count} Batch size {batch_size}")
+        logging.info(f"Length {length} Combinations {combination_count}")
         try:
-            for batch in generate_combinations(charset,batch_size,length):
-                hashed_batch = [hashlib.md5(comb.encode()).hexdigest() for comb in batch]
-                for password in hashed_batch:
-                    logging.info(f"Checking password: {batch[hashed_batch.index(password)]}")
-                    if password == get_password_:
-                        pipe.send(password)
+            for password in generate_combinations(charset,length):
+                hashed = hashlib.md5(password.encode()).hexdigest()
+                if hashed == get_password_:
+                    pipe.send(password)
+                    raise PasswordFound(password)
         except StopIteration:
             continue
     
